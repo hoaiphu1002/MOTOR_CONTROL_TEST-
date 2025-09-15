@@ -60,8 +60,8 @@ all: main-build
 main-build: CANOpenNode-STM32F407-Disco.elf secondary-outputs
 
 # Tool invocations
-CANOpenNode-STM32F407-Disco.elf CANOpenNode-STM32F407-Disco.map: $(OBJS) $(USER_OBJS) D:\MICROCONTROLLER\STM32\ CODE\STM32F4\stm32f4xx_can\ (1)\STM32F407VGTX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
-	arm-none-eabi-gcc -o "CANOpenNode-STM32F407-Disco.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m4 -T"D:\MICROCONTROLLER\STM32 CODE\STM32F4\stm32f4xx_can (1)\STM32F407VGTX_FLASH.ld" --specs=nosys.specs -Wl,-Map="CANOpenNode-STM32F407-Disco.map" -Wl,--gc-sections -static -u _printf_float --specs=nano.specs -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
+CANOpenNode-STM32F407-Disco.elf CANOpenNode-STM32F407-Disco.map: $(OBJS) $(USER_OBJS) D:\MICROCONTROLLER\STM32\ CODE\stm32f4xx_can\ (1)\ -\ Copy\STM32F407VGTX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
+	arm-none-eabi-gcc -o "CANOpenNode-STM32F407-Disco.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m4 -T"D:\MICROCONTROLLER\STM32 CODE\stm32f4xx_can (1) - Copy\STM32F407VGTX_FLASH.ld" --specs=nosys.specs -Wl,-Map="CANOpenNode-STM32F407-Disco.map" -Wl,--gc-sections -static -u _printf_float --specs=nano.specs -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
 	@echo 'Finished building target: $@'
 	@echo ' '
 

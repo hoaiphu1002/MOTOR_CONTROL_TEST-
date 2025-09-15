@@ -923,6 +923,27 @@ void request_statusword(uint8_t nodeId) {
     uint32_t txMailbox;
     HAL_CAN_AddTxMessage(&hcan2, &txHeader, txData, &txMailbox);
 }
+
+void HAL_CAN_ErrorCallback(CAN_HandleTypeDef *hcan) {
+    if (hcan->ErrorCode & HAL_CAN_ERROR_BOF) {
+        HAL_CAN_Stop(hcan);
+        HAL_CAN_DeInit(hcan);
+        HAL_CAN_Init(hcan);
+        HAL_CAN_Start(hcan);
+
+        // Bật lại interrupt
+        HAL_CAN_ActivateNotification(hcan,
+            CAN_IT_RX_FIFO0_MSG_PENDING |
+            CAN_IT_ERROR_WARNING |
+            CAN_IT_ERROR_PASSIVE |
+            CAN_IT_BUSOFF |
+            CAN_IT_LAST_ERROR_CODE |
+            CAN_IT_ERROR);
+//
+//        char msg[] = "⚡ CAN bus-off recovered\r\n";
+//        HAL_UART_Transmit(&huart1, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
+    }
+}
 /* USER CODE END 0 */
 
 /**
@@ -980,8 +1001,34 @@ int main(void)
     filter.FilterScale = CAN_FILTERSCALE_32BIT;
     filter.SlaveStartFilterBank = 14;
     HAL_CAN_ConfigFilter(&hcan2, &filter);
+
+//    CAN_FilterTypeDef filter;
+//    filter.FilterActivation = CAN_FILTER_ENABLE;
+//    filter.FilterBank = 14;
+//    filter.FilterFIFOAssignment = CAN_FILTER_FIFO0;
+//    filter.FilterMode = CAN_FILTERMODE_IDLIST;
+//    filter.FilterScale = CAN_FILTERSCALE_32BIT;
+//
+//    // ID 1: 0x030
+//    filter.FilterIdHigh     = (0x030 << 5);
+//    filter.FilterIdLow      = 0x0000;
+//
+//    // ID 2: 0x024
+//    filter.FilterMaskIdHigh = (0x024 << 5);
+//    filter.FilterMaskIdLow  = 0x0000;
+//
+//    filter.SlaveStartFilterBank = 14;
+//    HAL_CAN_ConfigFilter(&hcan2, &filter);
+
 //    HAL_CAN_Start(&hcan2);
-HAL_CAN_ActivateNotification(&hcan2, CAN_IT_RX_FIFO0_MSG_PENDING);
+//HAL_CAN_ActivateNotification(&hcan2, CAN_IT_RX_FIFO0_MSG_PENDING);
+HAL_CAN_ActivateNotification(&hcan2,
+	CAN_IT_RX_FIFO0_MSG_PENDING|
+    CAN_IT_ERROR_WARNING |
+    CAN_IT_ERROR_PASSIVE |
+    CAN_IT_BUSOFF |
+    CAN_IT_LAST_ERROR_CODE |
+    CAN_IT_ERROR);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -1214,7 +1261,7 @@ HAL_CAN_ActivateNotification(&hcan2, CAN_IT_RX_FIFO0_MSG_PENDING);
             prevVel2 = vel2;
         }
         // === Đọc tốc độ thực tế mỗi 200ms ===
-        if (now - lastPrint >= 100) { // cứ 100ms gửi vận tốc lên 1 làn
+        if (now - lastPrint >= 200) { // cứ 100ms gửi vận tốc lên 1 làn
             lastPrint = now;
           request_actual_velocity(1);
           request_actual_velocity(2);
@@ -1294,12 +1341,12 @@ static void MX_CAN2_Init(void)
   hcan2.Init.SyncJumpWidth = CAN_SJW_1TQ;
   hcan2.Init.TimeSeg1 = CAN_BS1_12TQ;
   hcan2.Init.TimeSeg2 = CAN_BS2_1TQ;
-  hcan2.Init.TimeTriggeredMode = ENABLE;
+  hcan2.Init.TimeTriggeredMode = DISABLE;
   hcan2.Init.AutoBusOff = ENABLE;
   hcan2.Init.AutoWakeUp = ENABLE;
   hcan2.Init.AutoRetransmission = ENABLE;
   hcan2.Init.ReceiveFifoLocked = DISABLE;
-  hcan2.Init.TransmitFifoPriority = ENABLE;
+  hcan2.Init.TransmitFifoPriority = DISABLE;
   if (HAL_CAN_Init(&hcan2) != HAL_OK)
   {
     Error_Handler();

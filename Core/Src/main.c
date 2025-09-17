@@ -79,6 +79,9 @@ extern volatile int32_t OD_MBDV_PositionActual; // Khai báo extern
 #define NODE_ID(node) ((node)->desiredN
 volatile uint32_t can_rx_count = 0;
 volatile uint32_t can_rx_flag = 0;
+volatile uint8_t need_enable_node1 = 0;
+volatile uint8_t need_enable_node2 = 0;
+
 
 /* USER CODE END Includes */
 
@@ -151,6 +154,22 @@ static void MX_I2C3_Init(void);
 static void MX_CAN2_Init(void);
 static void MX_TIM8_Init(void);
 /* USER CODE BEGIN PFP */
+HAL_StatusTypeDef CAN_SendNonBlocking(CAN_HandleTypeDef *hcan,
+                                      CAN_TxHeaderTypeDef *header,
+                                      uint8_t *data,
+                                      uint32_t *mailbox)
+{
+    if (HAL_CAN_GetTxMailboxesFreeLevel(hcan) > 0) {
+        // Có slot trống → gửi bình thường
+        return HAL_CAN_AddTxMessage(hcan, header, data, mailbox);
+    } else {
+        // Không có slot → hủy hết gói đang pending
+        HAL_CAN_AbortTxRequest(hcan, 0x7);  // bitmask 0x7 = abort mailbox 0,1,2
+
+        // Thử gửi lại frame mới
+        return HAL_CAN_AddTxMessage(hcan, header, data, mailbox);
+    }
+}
 
 /* USER CODE END PFP */
 
@@ -217,7 +236,7 @@ void set_drive_mode(uint8_t mode, uint8_t nodeId) {
     TxHeader.DLC = 2;
     data[0] = 0x01;       // Command: Start remote node
     data[1] = nodeId;     // Node ID
-    HAL_CAN_AddTxMessage(&hcan2, &TxHeader, data, &txMailbox);
+    CAN_SendNonBlocking(&hcan2, &TxHeader, data, &txMailbox);
     HAL_Delay(100);
     snprintf(msg, sizeof(msg), "🔌 NMT Start sent to Node %d\r\n", nodeId);
     print_uart(msg);
@@ -226,7 +245,8 @@ void set_drive_mode(uint8_t mode, uint8_t nodeId) {
     TxHeader.StdId = 0x600 + nodeId;  // COB-ID for SDO Tx
     TxHeader.DLC = 8;
     uint8_t mode_vel[] = {0x2F, 0x60, 0x60, 0x00, mode, 0x00, 0x00, 0x00};
-    HAL_CAN_AddTxMessage(&hcan2, &TxHeader, mode_vel, &txMailbox);
+//    CAN_SendNonBlocking(&hcan2, &TxHeader, mode_vel, &txMailbox);
+    CAN_SendNonBlocking(&hcan2, &TxHeader, mode_vel, &txMailbox);
     HAL_Delay(50);
     print_uart("⚙️ Set mode to Velocity (0x6060 = 3)\r\n");
 
@@ -234,19 +254,19 @@ void set_drive_mode(uint8_t mode, uint8_t nodeId) {
 
     // 1. Shutdown (0x06)
     uint8_t cw_shutdown[] = {0x2F, 0x40, 0x60, 0x00, 0x06, 0x00, 0x00, 0x00};
-    HAL_CAN_AddTxMessage(&hcan2, &TxHeader, cw_shutdown, &txMailbox);
+    CAN_SendNonBlocking(&hcan2, &TxHeader, cw_shutdown, &txMailbox);
     HAL_Delay(50);
     print_uart("🔄 CW = 0x06 (Shutdown)\r\n");
 
     // 2. Switch ON (0x07)
     uint8_t cw_switchon[] = {0x2F, 0x40, 0x60, 0x00, 0x07, 0x00, 0x00, 0x00};
-    HAL_CAN_AddTxMessage(&hcan2, &TxHeader, cw_switchon, &txMailbox);
+    CAN_SendNonBlocking(&hcan2, &TxHeader, cw_switchon, &txMailbox);
     HAL_Delay(50);
     print_uart("🔄 CW = 0x07 (Switch ON)\r\n");
 
     // 3. Enable operation (0x0F)
     uint8_t cw_enable[] = {0x2F, 0x40, 0x60, 0x00, 0x0F, 0x00, 0x00, 0x00};
-    HAL_CAN_AddTxMessage(&hcan2, &TxHeader, cw_enable, &txMailbox);
+    CAN_SendNonBlocking(&hcan2, &TxHeader, cw_enable, &txMailbox);
     HAL_Delay(100);
     print_uart("✅ CW = 0x0F (Enable Operation)\r\n");
 
@@ -395,7 +415,7 @@ void send_sdo_write_u8(uint8_t nodeId, uint16_t index, uint8_t subidx, uint8_t v
     TxHeader.IDE = CAN_ID_STD;
     TxHeader.RTR = CAN_RTR_DATA;
 
-    HAL_CAN_AddTxMessage(&hcan2, &TxHeader, data, &txMailbox);
+    CAN_SendNonBlocking(&hcan2, &TxHeader, data, &txMailbox);
     HAL_Delay(10);
 }
 void send_sdo_write_u16(uint8_t nodeId, uint16_t index, uint8_t subidx, uint16_t value) {
@@ -417,7 +437,7 @@ void send_sdo_write_u16(uint8_t nodeId, uint16_t index, uint8_t subidx, uint16_t
     TxHeader.IDE = CAN_ID_STD;
     TxHeader.RTR = CAN_RTR_DATA;
 
-    HAL_CAN_AddTxMessage(&hcan2, &TxHeader, data, &txMailbox);
+    CAN_SendNonBlocking(&hcan2, &TxHeader, data, &txMailbox);
     HAL_Delay(10);
 }
 void send_sdo_write_u32(uint8_t nodeId, uint16_t index, uint8_t subidx, uint32_t value) {
@@ -439,7 +459,7 @@ void send_sdo_write_u32(uint8_t nodeId, uint16_t index, uint8_t subidx, uint32_t
     TxHeader.IDE = CAN_ID_STD;
     TxHeader.RTR = CAN_RTR_DATA;
 
-    HAL_CAN_AddTxMessage(&hcan2, &TxHeader, data, &txMailbox);
+    CAN_SendNonBlocking(&hcan2, &TxHeader, data, &txMailbox);
     HAL_Delay(10);
 }
 void remap_rpdo1_for_velocity(uint8_t nodeId) {
@@ -488,7 +508,7 @@ void send_sync_frame() {
     tx.IDE = CAN_ID_STD;
     tx.RTR = CAN_RTR_DATA;
     tx.DLC = 0;
-    HAL_CAN_AddTxMessage(&hcan2, &tx, &dummy, &mbox);
+    CAN_SendNonBlocking(&hcan2, &tx, &dummy, &mbox);
     count_sync++;
 }
 
@@ -526,7 +546,7 @@ void send_velocity_rpdo(uint8_t node, int32_t velocity, bool toggle_cw, uint32_t
     TxHeader.RTR = CAN_RTR_DATA;
     TxHeader.DLC = 8;
 
-    HAL_CAN_AddTxMessage(&hcan2, &TxHeader, data, &txMailbox);
+    CAN_SendNonBlocking(&hcan2, &TxHeader, data, &txMailbox);
     HAL_Delay(5);
 }
 int32_t read_actual_velocity(uint8_t nodeId) {
@@ -547,7 +567,7 @@ int32_t read_actual_velocity(uint8_t nodeId) {
     txData[2] = 0x60;      // Index MSB
     txData[3] = 0x00;      // Subindex = 0
     // txData[4..7] = 0
-    HAL_CAN_AddTxMessage(&hcan2, &tx, txData, &txMailbox);
+    CAN_SendNonBlocking(&hcan2, &tx, txData, &txMailbox);
 HAL_Delay(100);
 if (HAL_CAN_GetRxMessage(&hcan2, CAN_RX_FIFO0, &rx, rxData) != HAL_OK) {
        print_uart("❌ Failed to get RX message\r\n");
@@ -619,7 +639,7 @@ void send_temp_to_usbcan(int32_t temperature) {
     data[2] = (uint8_t)((temperature >> 16) & 0xFF);
     data[3] = (uint8_t)((temperature >> 24) & 0xFF);
 
-    HAL_CAN_AddTxMessage(&hcan2, &TxHeader, data, &txMailbox);
+    CAN_SendNonBlocking(&hcan2, &TxHeader, data, &txMailbox);
 }
 // ⬆️ Global biến bổ sung
 volatile uint8_t node_booted[3] = {0};
@@ -665,7 +685,10 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan) {
         uint8_t nodeId = rxHeader.StdId - 0x700;
         node_booted[nodeId] = 1;
 
+        if (nodeId == 1) need_enable_node1 = 1;
+        if (nodeId == 2) need_enable_node2 = 1;
     }
+
 
 
     // Kiểm tra nếu đây là phản hồi từ node1 hoặc node2 cho SDO Actual Velocity
@@ -839,7 +862,7 @@ void send_vel_can(int32_t vel1, int32_t vel2) {
     data[7] = (uint8_t)((vel2 >> 24) & 0xFF);
 
     // ===== Gửi nếu Mailbox rảnh =====
-    if (HAL_CAN_AddTxMessage(&hcan2, &TxHeader, data, &txMailbox) == HAL_OK) {
+    if (CAN_SendNonBlocking(&hcan2, &TxHeader, data, &txMailbox) == HAL_OK) {
         count_send_vel_can++;
     } else {
         // Nếu mailbox đầy, bỏ qua frame này để tránh nghẽn
@@ -877,9 +900,9 @@ void update_vel(uint8_t node, int32_t velocity, bool toggle_cw, uint32_t accel, 
 	    TxHeader.IDE = CAN_ID_STD;
 	    TxHeader.RTR = CAN_RTR_DATA;
 	    TxHeader.DLC = 8;
-	    HAL_CAN_AddTxMessage(&hcan2, &TxHeader, data, &txMailbox);
+	    CAN_SendNonBlocking(&hcan2, &TxHeader, data, &txMailbox);
 	    // ===== Gửi nếu Mailbox rảnh =====
-	    if (HAL_CAN_AddTxMessage(&hcan2, &TxHeader, data, &txMailbox) == HAL_OK) {
+	    if (CAN_SendNonBlocking(&hcan2, &TxHeader, data, &txMailbox) == HAL_OK) {
 	        count_send_vel_can++;
 	    } else {
 	        // Nếu mailbox đầy, bỏ qua frame này để tránh nghẽn
@@ -898,7 +921,7 @@ void request_actual_velocity(uint8_t nodeId) {
     tx.RTR = CAN_RTR_DATA;
     tx.DLC = 8;
 
-    HAL_CAN_AddTxMessage(&hcan2, &tx, txData, &txMailbox);
+    CAN_SendNonBlocking(&hcan2, &tx, txData, &txMailbox);
 }
 //doc statusword tu driver
 void request_statusword(uint8_t nodeId) {
@@ -921,7 +944,7 @@ void request_statusword(uint8_t nodeId) {
     txData[7] = 0x00;
 
     uint32_t txMailbox;
-    HAL_CAN_AddTxMessage(&hcan2, &txHeader, txData, &txMailbox);
+    CAN_SendNonBlocking(&hcan2, &txHeader, txData, &txMailbox);
 }
 
 void HAL_CAN_ErrorCallback(CAN_HandleTypeDef *hcan) {
@@ -944,6 +967,9 @@ void HAL_CAN_ErrorCallback(CAN_HandleTypeDef *hcan) {
 //        HAL_UART_Transmit(&huart1, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
     }
 }
+
+
+
 /* USER CODE END 0 */
 
 /**
@@ -1071,37 +1097,24 @@ HAL_CAN_ActivateNotification(&hcan2,
 
     	   /* USER CODE BEGIN 3 */
     	// Nếu cả 2 node booted cùng lúc
-    	if (node_booted[1] && node_booted[2]) {
-    	    node_booted[1] = 0;
-    	    node_booted[2] = 0;
-    	    HAL_Delay(100);
-
-    	    // --- NMT Start cả 2 ---
-//    	    send_nmt_start(1);
-//    	    send_nmt_start(2);
-//    	    HAL_Delay(10);
-
-    	    // --- Cấu hình Mode + PDO ---
-    	    set_drive_mode(3,1);
-    	    set_drive_mode(3,2);
-
+    	if (need_enable_node1) {
+    	    need_enable_node1 = 0;
+    	    set_drive_mode(3, 1);
     	    remap_rpdo1_for_velocity(1);
-    	    remap_rpdo1_for_velocity(2);
-
     	    remap_tpdo1_velocity(1);
-    	    remap_tpdo1_velocity(2);
-
-    	    // --- Reset vận tốc về 0 ---
-    	    send_velocity_rpdo(1, 0, true, 50000, 200000);
-    	    send_velocity_rpdo(2, 0, true, 50000, 200000);
-    	    HAL_Delay(20);
-
-    	    // --- Enable đồng thời ---
     	    send_enable_sequence(1);
-    	    send_enable_sequence(2);
-
-    	    print_uart("✅ Cả 2 node đã re-enable đồng bộ\r\n");
+    	    print_uart("✅ Node1 enabled\r\n");
     	}
+
+    	if (need_enable_node2) {
+    	    need_enable_node2 = 0;
+    	    set_drive_mode(3, 2);
+    	    remap_rpdo1_for_velocity(2);
+    	    remap_tpdo1_velocity(2);
+    	    send_enable_sequence(2);
+    	    print_uart("✅ Node2 enabled\r\n");
+    	}
+
 
 
     	 int32_t vel1 = 0, vel2 = 0;

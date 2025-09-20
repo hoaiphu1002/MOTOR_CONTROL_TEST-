@@ -79,9 +79,9 @@ extern volatile int32_t OD_MBDV_PositionActual; // Khai báo extern
 #define NODE_ID(node) ((node)->desiredN
 volatile uint32_t can_rx_count = 0;
 volatile uint32_t can_rx_flag = 0;
-volatile uint8_t need_enable_node1 = 0;
-volatile uint8_t need_enable_node2 = 0;
 
+volatile uint32_t can1_tx_success = 0;   // số gói gửi thành công
+volatile uint32_t can1_rx_success = 0;   // số gói nhận thành công
 
 /* USER CODE END Includes */
 
@@ -104,8 +104,6 @@ CAN_HandleTypeDef hcan2;
 
 I2C_HandleTypeDef hi2c1;
 I2C_HandleTypeDef hi2c3;
-DMA_HandleTypeDef hdma_i2c3_rx;
-DMA_HandleTypeDef hdma_i2c3_tx;
 
 SPI_HandleTypeDef hspi1;
 
@@ -144,7 +142,6 @@ uint32_t SDO_timeout_ms = 500; // Thời gian chờ SDO
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
-static void MX_DMA_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_TIM14_Init(void);
@@ -159,16 +156,30 @@ HAL_StatusTypeDef CAN_SendNonBlocking(CAN_HandleTypeDef *hcan,
                                       uint8_t *data,
                                       uint32_t *mailbox)
 {
-    if (HAL_CAN_GetTxMailboxesFreeLevel(hcan) > 0) {
-        // Có slot trống → gửi bình thường
-        return HAL_CAN_AddTxMessage(hcan, header, data, mailbox);
-    } else {
-        // Không có slot → hủy hết gói đang pending
-        HAL_CAN_AbortTxRequest(hcan, 0x7);  // bitmask 0x7 = abort mailbox 0,1,2
+    uint32_t startTick = HAL_GetTick();
 
-        // Thử gửi lại frame mới
-        return HAL_CAN_AddTxMessage(hcan, header, data, mailbox);
+    // ⏳ Chờ tối đa 2ms cho tới khi có mailbox trống
+    while (HAL_CAN_GetTxMailboxesFreeLevel(hcan) == 0) {
+        if (HAL_GetTick() - startTick > 2) {
+            // Quá hạn, bỏ qua frame để tránh nghẽn
+            return HAL_BUSY;
+        }
     }
+
+    // ✅ Có slot trống → gửi ngay
+    HAL_StatusTypeDef status = HAL_CAN_AddTxMessage(hcan, header, data, mailbox);
+
+    if (status != HAL_OK) {
+        // Nếu lỗi, thử tối đa 2 lần nữa
+        for (int retry = 0; retry < 2; retry++) {
+            if (HAL_CAN_AddTxMessage(hcan, header, data, mailbox) == HAL_OK) {
+                return HAL_OK;
+            }
+        }
+        return HAL_ERROR;
+    }
+
+    return HAL_OK;
 }
 
 /* USER CODE END PFP */
@@ -186,6 +197,9 @@ CAN_RxHeaderTypeDef RxHeader;
 CAN_TxHeaderTypeDef TxHeader;
 uint8_t TxData[8] = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88};
 uint32_t TxMailbox;
+
+volatile uint32_t can2_tx_success = 0;   // số gói gửi thành công
+volatile uint32_t can2_rx_success = 0;   // số gói nhận thành công
 
 void print_uart(const char *msg) {
     HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
@@ -245,7 +259,6 @@ void set_drive_mode(uint8_t mode, uint8_t nodeId) {
     TxHeader.StdId = 0x600 + nodeId;  // COB-ID for SDO Tx
     TxHeader.DLC = 8;
     uint8_t mode_vel[] = {0x2F, 0x60, 0x60, 0x00, mode, 0x00, 0x00, 0x00};
-//    CAN_SendNonBlocking(&hcan2, &TxHeader, mode_vel, &txMailbox);
     CAN_SendNonBlocking(&hcan2, &TxHeader, mode_vel, &txMailbox);
     HAL_Delay(50);
     print_uart("⚙️ Set mode to Velocity (0x6060 = 3)\r\n");
@@ -643,6 +656,7 @@ void send_temp_to_usbcan(int32_t temperature) {
 }
 // ⬆️ Global biến bổ sung
 volatile uint8_t node_booted[3] = {0};
+volatile uint8_t already_initialized[3] = {0};  // 0 = chưa init, 1 = đã init
 volatile uint8_t  drive_enabled1 = 0;
 volatile uint8_t  drive_enabled2 = 0;
 volatile uint8_t ps2_blocked = 0;  // Nếu bị block bởi vật cản
@@ -683,11 +697,13 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan) {
         rxHeader.DLC == 1 && rxData[0] == 0x00) {
 
         uint8_t nodeId = rxHeader.StdId - 0x700;
-        node_booted[nodeId] = 1;
 
-        if (nodeId == 1) need_enable_node1 = 1;
-        if (nodeId == 2) need_enable_node2 = 1;
+        if (!already_initialized[nodeId]) {
+            node_booted[nodeId] = 1;
+        }
     }
+
+
 
 
 
@@ -840,7 +856,7 @@ void send_vel_can(int32_t vel1, int32_t vel2) {
     uint8_t data[8];
 
     // ===== Giới hạn tần suất gửi: mỗi 20ms một lần (50Hz) =====
-    if (HAL_GetTick() - last_tick < 50) return;
+    if (HAL_GetTick() - last_tick < 10) return;
     last_tick = HAL_GetTick();
 
     // ===== Header CAN =====
@@ -901,13 +917,7 @@ void update_vel(uint8_t node, int32_t velocity, bool toggle_cw, uint32_t accel, 
 	    TxHeader.RTR = CAN_RTR_DATA;
 	    TxHeader.DLC = 8;
 	    CAN_SendNonBlocking(&hcan2, &TxHeader, data, &txMailbox);
-	    // ===== Gửi nếu Mailbox rảnh =====
-	    if (CAN_SendNonBlocking(&hcan2, &TxHeader, data, &txMailbox) == HAL_OK) {
-	        count_send_vel_can++;
-	    } else {
-	        // Nếu mailbox đầy, bỏ qua frame này để tránh nghẽn
-	        // (có thể thêm debug ở đây nếu muốn)
-	    }
+	    HAL_Delay(5);
 }
 // => sau đó gọi update_vel(1,vel1,true,50000, 150000) -> để cập nhật vận tốc đến driver và motor 1
 // => sau đó gọi update_vel(2,vel2,true,50000, 150000) -> để cập nhật vận tốc đến driver và motor 2
@@ -947,28 +957,70 @@ void request_statusword(uint8_t nodeId) {
     CAN_SendNonBlocking(&hcan2, &txHeader, txData, &txMailbox);
 }
 
+void HAL_CAN_TxMailbox0CompleteCallback(CAN_HandleTypeDef *hcan) {
+    if (hcan->Instance == CAN2) {
+        can2_tx_success++;
+    }
+}
+void HAL_CAN_TxMailbox1CompleteCallback(CAN_HandleTypeDef *hcan) {
+    if (hcan->Instance == CAN2) {
+        can2_tx_success++;
+    }
+}
+void HAL_CAN_TxMailbox2CompleteCallback(CAN_HandleTypeDef *hcan) {
+    if (hcan->Instance == CAN2) {
+        can2_tx_success++;
+    }
+}
+
+static uint8_t can_recover_attempts = 0;
+
 void HAL_CAN_ErrorCallback(CAN_HandleTypeDef *hcan) {
-    if (hcan->ErrorCode & HAL_CAN_ERROR_BOF) {
+    uint32_t err = hcan->ErrorCode;
+
+    if (err == HAL_CAN_ERROR_NONE) return;
+
+    char msg[128];
+    sprintf(msg, "⚠️ CAN Error: 0x%08lX\r\n", err);
+
+    // --- Nhóm lỗi nghiêm trọng cần reset CAN ---
+    if (err & (HAL_CAN_ERROR_BOF |
+               HAL_CAN_ERROR_ACK |
+               HAL_CAN_ERROR_TX_TERR0 | HAL_CAN_ERROR_TX_TERR1 | HAL_CAN_ERROR_TX_TERR2 |
+               HAL_CAN_ERROR_RX_FOV0 | HAL_CAN_ERROR_RX_FOV1))
+    {
+        can_recover_attempts++;
+
         HAL_CAN_Stop(hcan);
         HAL_CAN_DeInit(hcan);
         HAL_CAN_Init(hcan);
         HAL_CAN_Start(hcan);
 
-        // Bật lại interrupt
         HAL_CAN_ActivateNotification(hcan,
-            CAN_IT_RX_FIFO0_MSG_PENDING |
-            CAN_IT_ERROR_WARNING |
-            CAN_IT_ERROR_PASSIVE |
-            CAN_IT_BUSOFF |
-            CAN_IT_LAST_ERROR_CODE |
-            CAN_IT_ERROR);
-//
-//        char msg[] = "⚡ CAN bus-off recovered\r\n";
-//        HAL_UART_Transmit(&huart1, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
+            CAN_IT_ERROR_WARNING | CAN_IT_ERROR_PASSIVE |
+            CAN_IT_BUSOFF | CAN_IT_LAST_ERROR_CODE | CAN_IT_ERROR);
+
+        if (can_recover_attempts >= 3) {
+            NVIC_SystemReset();
+        }
     }
+
+    // --- Các lỗi nhẹ: chỉ log ---
+    if (err & HAL_CAN_ERROR_EWG)  printf("CAN Warning Error\r\n");
+    if (err & HAL_CAN_ERROR_EPV)  printf("CAN Passive Error\r\n");
+    if (err & HAL_CAN_ERROR_STF)  printf("CAN Stuff Error\r\n");
+    if (err & HAL_CAN_ERROR_FOR)  printf("CAN Form Error\r\n");
+    if (err & HAL_CAN_ERROR_BR)   printf("CAN Bit Recessive Error\r\n");
+    if (err & HAL_CAN_ERROR_BD)   printf("CAN Bit Dominant Error\r\n");
+    if (err & HAL_CAN_ERROR_CRC)  printf("CAN CRC Error\r\n");
+
+    // --- Timeout & init errors ---
+    if (err & HAL_CAN_ERROR_TIMEOUT)        printf("CAN Timeout Error\r\n");
+    if (err & HAL_CAN_ERROR_NOT_INITIALIZED)printf("CAN Not Init Error\r\n");
+    if (err & HAL_CAN_ERROR_NOT_READY)      printf("CAN Not Ready Error\r\n");
+    if (err & HAL_CAN_ERROR_NOT_STARTED)    printf("CAN Not Started Error\r\n");
+    if (err & HAL_CAN_ERROR_PARAM)          printf("CAN Parameter Error\r\n");
 }
-
-
 
 /* USER CODE END 0 */
 
@@ -1001,7 +1053,6 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  MX_DMA_Init();
   MX_I2C1_Init();
   MX_SPI1_Init();
   MX_TIM14_Init();
@@ -1027,27 +1078,9 @@ int main(void)
     filter.FilterScale = CAN_FILTERSCALE_32BIT;
     filter.SlaveStartFilterBank = 14;
     HAL_CAN_ConfigFilter(&hcan2, &filter);
-
-//    CAN_FilterTypeDef filter;
-//    filter.FilterActivation = CAN_FILTER_ENABLE;
-//    filter.FilterBank = 14;
-//    filter.FilterFIFOAssignment = CAN_FILTER_FIFO0;
-//    filter.FilterMode = CAN_FILTERMODE_IDLIST;
-//    filter.FilterScale = CAN_FILTERSCALE_32BIT;
-//
-//    // ID 1: 0x030
-//    filter.FilterIdHigh     = (0x030 << 5);
-//    filter.FilterIdLow      = 0x0000;
-//
-//    // ID 2: 0x024
-//    filter.FilterMaskIdHigh = (0x024 << 5);
-//    filter.FilterMaskIdLow  = 0x0000;
-//
-//    filter.SlaveStartFilterBank = 14;
-//    HAL_CAN_ConfigFilter(&hcan2, &filter);
-
-//    HAL_CAN_Start(&hcan2);
+    HAL_CAN_Start(&hcan2);
 //HAL_CAN_ActivateNotification(&hcan2, CAN_IT_RX_FIFO0_MSG_PENDING);
+
 HAL_CAN_ActivateNotification(&hcan2,
 	CAN_IT_RX_FIFO0_MSG_PENDING|
     CAN_IT_ERROR_WARNING |
@@ -1063,6 +1096,7 @@ HAL_CAN_ActivateNotification(&hcan2,
 // CANopenNodeSTM32 axis;
 	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_11, GPIO_PIN_RESET);//on led
 	HAL_GPIO_WritePin(GPIOE, GPIO_PIN_3, GPIO_PIN_SET);
+    HAL_Delay(100);
     //print_uart("Nhấn MODE nếu cần cho Analog\r\n");
    // HAL_Delay(1000);
     PS2_Init();
@@ -1090,6 +1124,9 @@ HAL_CAN_ActivateNotification(&hcan2,
   uint32_t last_upvel2_time = 0;
   (void)last_upvel1_time; (void)last_upvel2_time; /* Silence unused-variable warnings */
 
+   // uint32_t lastHCSR04 = 0;
+  //  uint8_t ready=0;
+   // uint8_t Distance  = 0;
 
     while (1) {
 
@@ -1097,22 +1134,40 @@ HAL_CAN_ActivateNotification(&hcan2,
 
     	   /* USER CODE BEGIN 3 */
     	// Nếu cả 2 node booted cùng lúc
-    	if (need_enable_node1) {
-    	    need_enable_node1 = 0;
-    	    set_drive_mode(3, 1);
-    	    remap_rpdo1_for_velocity(1);
-    	    remap_tpdo1_velocity(1);
-    	    send_enable_sequence(1);
-    	    print_uart("✅ Node1 enabled\r\n");
-    	}
+    	if (node_booted[1] && node_booted[2]) {
+    	    node_booted[1] = 0;
+    	    node_booted[2] = 0;
+    	    HAL_Delay(100);
 
-    	if (need_enable_node2) {
-    	    need_enable_node2 = 0;
-    	    set_drive_mode(3, 2);
+    	    // --- Đánh dấu đã init ---
+    	    already_initialized[1] = 1;
+    	    already_initialized[2] = 1;
+
+    	    // --- NMT Start cả 2 (nếu cần) ---
+    	//    send_nmt_start(1);
+    	//    send_nmt_start(2);
+    	//    HAL_Delay(10);
+
+    	    // --- Cấu hình Mode + PDO ---
+    	    set_drive_mode(3,1);
+    	    set_drive_mode(3,2);
+
+    	    remap_rpdo1_for_velocity(1);
     	    remap_rpdo1_for_velocity(2);
+
+    	    remap_tpdo1_velocity(1);
     	    remap_tpdo1_velocity(2);
+
+    	    // --- Reset vận tốc về 0 ---
+    	    send_velocity_rpdo(1, 0, true, 50000, 200000);
+    	    send_velocity_rpdo(2, 0, true, 50000, 200000);
+    	    HAL_Delay(20);
+
+    	    // --- Enable đồng thời ---
+    	    send_enable_sequence(1);
     	    send_enable_sequence(2);
-    	    print_uart("✅ Node2 enabled\r\n");
+
+    	    print_uart("✅ Cả 2 node đã re-enable đồng bộ và reset vận tốc về 0\r\n");
     	}
 
 
@@ -1274,7 +1329,7 @@ HAL_CAN_ActivateNotification(&hcan2,
             prevVel2 = vel2;
         }
         // === Đọc tốc độ thực tế mỗi 200ms ===
-        if (now - lastPrint >= 200) { // cứ 100ms gửi vận tốc lên 1 làn
+        if (now - lastPrint >= 100) { // cứ 100ms gửi vận tốc lên 1 làn
             lastPrint = now;
           request_actual_velocity(1);
           request_actual_velocity(2);
@@ -1283,6 +1338,9 @@ HAL_CAN_ActivateNotification(&hcan2,
          // send_vel_can(1, currentVel2);
 
         }
+
+    HAL_Delay(50);
+
     }
 
   /* USER CODE END 3 */
@@ -1627,25 +1685,6 @@ static void MX_USART2_UART_Init(void)
 }
 
 /**
-  * Enable DMA controller clock
-  */
-static void MX_DMA_Init(void)
-{
-
-  /* DMA controller clock enable */
-  __HAL_RCC_DMA1_CLK_ENABLE();
-
-  /* DMA interrupt init */
-  /* DMA1_Stream2_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA1_Stream2_IRQn, 0, 0);
-  HAL_NVIC_EnableIRQ(DMA1_Stream2_IRQn);
-  /* DMA1_Stream4_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA1_Stream4_IRQn, 0, 0);
-  HAL_NVIC_EnableIRQ(DMA1_Stream4_IRQn);
-
-}
-
-/**
   * @brief GPIO Initialization Function
   * @param None
   * @retval None
@@ -1792,10 +1831,6 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Mode = GPIO_MODE_EVT_RISING;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(MEMS_INT2_GPIO_Port, &GPIO_InitStruct);
-
-  /* EXTI interrupt init*/
-  HAL_NVIC_SetPriority(EXTI0_IRQn, 0, 0);
-  HAL_NVIC_EnableIRQ(EXTI0_IRQn);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
   /* Bật ngắt EXTI cho PA0 */
